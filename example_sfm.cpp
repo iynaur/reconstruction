@@ -3,6 +3,9 @@
 #include <opencv2/sfm.hpp>
 #include <iostream>
 #include <fstream>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
 
 using namespace std;
 using namespace cv;
@@ -79,13 +82,18 @@ int main(int argc, char* argv[])
   cv::MatIterator_<double> mat_it;
   points_file.open("points.txt");
   points_file.precision(std::numeric_limits<double>::digits10);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloudp (new pcl::PointCloud<pcl::PointXYZ>);
+  cloudp->resize(points3d_estimated.size());
   for (int i = 0; i < points3d_estimated.size(); ++i) {
     cout << points3d_estimated[i] << endl;
+    int id = 0;
     for(mat_it = points3d_estimated[i].begin<double>(); mat_it != points3d_estimated[i].end<double>(); mat_it++) {
       points_file << *mat_it << " ";
+      cloudp->points[i].data[id++] = *mat_it;
     }
     points_file << "\n";
   }
+  pcl::io::savePCDFile("ans.pcd", *cloudp);
 
   cout << "Done. Points saved to points.txt" << endl;
   points_file.close();
