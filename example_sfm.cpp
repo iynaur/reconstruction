@@ -16,12 +16,302 @@
 
 // OpenCV
 #include <opencv2/sfm.hpp>
+#include <opencv2/sfm/conditioning.hpp>
+#include <opencv2/sfm/fundamental.hpp>
+#include <opencv2/sfm/io.hpp>
+#include <opencv2/sfm/numeric.hpp>
+#include <opencv2/sfm/projection.hpp>
+#include <opencv2/sfm/triangulation.hpp>
+
+#include <opencv2/sfm/reconstruct.hpp>
+#include <opencv2/sfm/simple_pipeline.hpp>
 
 #include <iostream>
 
 using namespace cv;
 //using namespace cv::sfm;
 using namespace std;
+
+#include <Eigen/Core>
+
+#include <opencv2/core/eigen.hpp>
+#include <opencv2/xfeatures2d.hpp>
+
+#include "libmv_light/libmv_capi.h"
+
+using namespace std;
+
+namespace cv
+{
+namespace sfm
+{
+
+/* Parses a given array of 2d points into the libmv tracks structure
+ */
+
+static void
+parser_2D_tracks( const std::vector<Mat> &points2d, libmv::Tracks &tracks )
+{
+  const int nframes = static_cast<int>(points2d.size());
+  for (int frame = 0; frame < nframes; ++frame) {
+    const int ntracks = points2d[frame].cols;
+    for (int track = 0; track < ntracks; ++track) {
+      const Vec2d track_pt = points2d[frame].col(track);
+      if ( track_pt[0] > 0 && track_pt[1] > 0 )
+        tracks.Insert(frame, track, track_pt[0], track_pt[1]);
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+/* Parses a given set of matches into the libmv tracks structure
+ */
+
+static void
+parser_2D_tracks( const libmv::Matches &matches, libmv::Tracks &tracks )
+{
+  std::set<Matches::ImageID>::const_iterator iter_image =
+    matches.get_images().begin();
+
+  bool is_first_time = true;
+
+  for (; iter_image != matches.get_images().end(); ++iter_image) {
+    // Exports points
+    Matches::Features<PointFeature> pfeatures =
+      matches.InImage<PointFeature>(*iter_image);
+
+    while(pfeatures) {
+
+      double x = pfeatures.feature()->x(),
+             y = pfeatures.feature()->y();
+
+      // valid marker
+      if ( x > 0 && y > 0 )
+      {
+        tracks.Insert(*iter_image, pfeatures.track(), x, y);
+
+        if ( is_first_time )
+          is_first_time = false;
+      }
+
+      // lost track
+      else if ( x < 0 && y < 0 )
+      {
+        is_first_time = true;
+      }
+
+      pfeatures.operator++();
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+/* Computes the 2d features matches between a given set of images and call the
+ * reconstruction pipeline.
+ */
+
+static libmv_Reconstruction *libmv_solveReconstructionImpl(
+  const std::vector<String> &images,
+  const libmv_CameraIntrinsicsOptions* libmv_camera_intrinsics_options,
+  libmv_ReconstructionOptions* libmv_reconstruction_options)
+{
+  Ptr<Feature2D> edetector = ORB::create(10000);
+  Ptr<Feature2D> edescriber = xfeatures2d::DAISY::create();
+  //Ptr<Feature2D> edescriber = xfeatures2d::LATCH::create(64, true, 4);
+  std::vector<std::string> sImages;
+  for (int i=0;i<images.size();i++)
+      sImages.push_back(images[i].c_str());
+  cout << "Initialize nViewMatcher ... ";
+  libmv::correspondence::nRobustViewMatching nViewMatcher(edetector, edescriber);
+
+  cout << "OK" << endl << "Performing Cross Matching ... ";
+  nViewMatcher.computeCrossMatch(sImages); cout << "OK" << endl;
+
+  // Building tracks
+  libmv::Tracks tracks;
+  libmv::Matches matches = nViewMatcher.getMatches();
+  parser_2D_tracks( matches, tracks );
+
+  // Perform reconstruction
+  return libmv_solveReconstruction(tracks,
+                                   libmv_camera_intrinsics_options,
+                                   libmv_reconstruction_options);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+template <class T>
+class SFMLibmvReconstructionImpl : public T
+{
+public:
+  SFMLibmvReconstructionImpl(const libmv_CameraIntrinsicsOptions &camera_instrinsic_options,
+                             const libmv_ReconstructionOptions &reconstruction_options) :
+    libmv_reconstruction_options_(reconstruction_options),
+    libmv_camera_intrinsics_options_(camera_instrinsic_options) {}
+
+  /* Run the pipeline given 2d points
+   */
+
+  virtual void run(InputArrayOfArrays _points2d)
+  {
+    std::vector<Mat> points2d;
+    _points2d.getMatVector(points2d);
+    CV_Assert( _points2d.total() >= 2 );
+
+    // Parse 2d points to Tracks
+    Tracks tracks;
+    parser_2D_tracks(points2d, tracks);
+
+    // Set libmv logs level
+    libmv_initLogging("");
+
+    if (libmv_reconstruction_options_.verbosity_level >= 0)
+    {
+      libmv_startDebugLogging();
+      libmv_setLoggingVerbosity(
+        libmv_reconstruction_options_.verbosity_level);
+    }
+
+    // Perform reconstruction
+    libmv_reconstruction_ =
+      *libmv_solveReconstruction(tracks,
+                                 &libmv_camera_intrinsics_options_,
+                                 &libmv_reconstruction_options_);
+  }
+
+  virtual void run(InputArrayOfArrays points2d, InputOutputArray K, OutputArray Rs,
+                   OutputArray Ts, OutputArray points3d)
+  {
+    // Run the pipeline
+    run(points2d);
+
+    // Extract Data
+    extractLibmvReconstructionData(K, Rs, Ts, points3d);
+  }
+
+
+  /* Run the pipeline given a set of images
+   */
+
+  virtual void run(const std::vector <String> &images)
+  {
+    // Set libmv logs level
+    libmv_initLogging("");
+
+    if (libmv_reconstruction_options_.verbosity_level >= 0)
+    {
+      libmv_startDebugLogging();
+      libmv_setLoggingVerbosity(
+        libmv_reconstruction_options_.verbosity_level);
+    }
+
+    // Perform reconstruction
+
+    libmv_reconstruction_ =
+      *libmv_solveReconstructionImpl(images,
+                                     &libmv_camera_intrinsics_options_,
+                                     &libmv_reconstruction_options_);
+  }
+
+
+  virtual void run(const std::vector <String> &images, InputOutputArray K, OutputArray Rs,
+                   OutputArray Ts, OutputArray points3d)
+  {
+    // Run the pipeline
+    run(images);
+
+    // Extract Data
+    extractLibmvReconstructionData(K, Rs, Ts, points3d);
+  }
+
+  virtual double getError() const { return libmv_reconstruction_.error; }
+
+  virtual void
+  getPoints(OutputArray points3d) {
+    const size_t n_points =
+      libmv_reconstruction_.reconstruction.AllPoints().size();
+
+    points3d.create(n_points, 1, CV_64F);
+
+    Vec3d point3d;
+    for ( size_t i = 0; i < n_points; ++i )
+    {
+      for ( int j = 0; j < 3; ++j )
+        point3d[j] =
+          libmv_reconstruction_.reconstruction.AllPoints()[i].X[j];
+      Mat(point3d).copyTo(points3d.getMatRef(i));
+    }
+
+  }
+
+  virtual cv::Mat getIntrinsics() const {
+    Mat K;
+    eigen2cv(libmv_reconstruction_.intrinsics->K(), K);
+    return K;
+  }
+
+  virtual void
+  getCameras(OutputArray Rs, OutputArray Ts) {
+    const size_t n_views =
+      libmv_reconstruction_.reconstruction.AllCameras().size();
+
+    Rs.create(n_views, 1, CV_64F);
+    Ts.create(n_views, 1, CV_64F);
+
+    Matx33d R;
+    Vec3d t;
+    for(size_t i = 0; i < n_views; ++i)
+    {
+      eigen2cv(libmv_reconstruction_.reconstruction.AllCameras()[i].R, R);
+      eigen2cv(libmv_reconstruction_.reconstruction.AllCameras()[i].t, t);
+      Mat(R).copyTo(Rs.getMatRef(i));
+      Mat(t).copyTo(Ts.getMatRef(i));
+    }
+  }
+
+  virtual void setReconstructionOptions(
+    const libmv_ReconstructionOptions &libmv_reconstruction_options) {
+      libmv_reconstruction_options_ = libmv_reconstruction_options;
+  }
+
+  virtual void setCameraIntrinsicOptions(
+    const libmv_CameraIntrinsicsOptions &libmv_camera_intrinsics_options) {
+      libmv_camera_intrinsics_options_ = libmv_camera_intrinsics_options;
+  }
+
+private:
+
+  void
+  extractLibmvReconstructionData(InputOutputArray K,
+                                 OutputArray Rs,
+                                 OutputArray Ts,
+                                 OutputArray points3d)
+  {
+    getCameras(Rs, Ts);
+    getPoints(points3d);
+    getIntrinsics().copyTo(K.getMat());
+  }
+
+  libmv_Reconstruction libmv_reconstruction_;
+  libmv_ReconstructionOptions libmv_reconstruction_options_;
+  libmv_CameraIntrinsicsOptions libmv_camera_intrinsics_options_;
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+Ptr<SFMLibmvEuclideanReconstruction>
+SFMLibmvEuclideanReconstruction::create(const libmv_CameraIntrinsicsOptions &camera_instrinsic_options,
+                                        const libmv_ReconstructionOptions &reconstruction_options)
+{
+  return makePtr<SFMLibmvReconstructionImpl<SFMLibmvEuclideanReconstruction> >(camera_instrinsic_options,reconstruction_options);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+} /* namespace cv */
+} /* namespace sfm */
 
 namespace cv
 {
@@ -334,7 +624,7 @@ static void help() {
       << endl;
 }
 
-int getdir(const string _filename, vector<String> &files)
+int getdir(const string _filename, std::vector<String> &files)
 {
   ifstream myfile(_filename.c_str());
   if (!myfile.is_open()) {
@@ -351,8 +641,14 @@ int getdir(const string _filename, vector<String> &files)
   return 1;
 }
 
-int main(int argc, char* argv[])
+int main()
 {
+  int argc = 5;
+  char* argv[5];
+  argv[1] = "dinoR_good_silhouette_images.txt";
+  argv[2] = "1000";
+  argv[3] = "320";
+  argv[4] = "240";
   // Read input parameters
   if ( argc != 5 )
   {
@@ -361,7 +657,7 @@ int main(int argc, char* argv[])
   }
 
   // Parse the image paths
-  vector<String> images_paths;
+  std::vector<String> images_paths;
   getdir(argv[1], images_paths);
 
   // Build instrinsics
@@ -371,7 +667,7 @@ int main(int argc, char* argv[])
                        0, f, cy,
                        0, 0,  1);
   bool is_projective = true;
-  vector<Mat> Rs_est, ts_est, points3d_estimated;
+  std::vector<cv::Mat> Rs_est, ts_est, points3d_estimated;
   mysfm::reconstruct(images_paths, Rs_est, ts_est, K, points3d_estimated, is_projective);
 
   // Print output

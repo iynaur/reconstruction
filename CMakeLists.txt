@@ -47,6 +47,52 @@ endif()
 
 set(CMAKE_EXE_LINKER_FLAGS "-Wl,-rpath=.")
 
+### LIBMV LIGHT DEFINITIONS ###
+find_package(Ceres)
+include_directories (libmv_light)
+set(LIBMV_LIGHT_INCLUDES
+  "${CMAKE_CURRENT_LIST_DIR}/src/libmv_light"
+  "${OpenCV_SOURCE_DIR}/include/opencv"
+  "${GLOG_INCLUDE_DIRS}"
+  "${GFLAGS_INCLUDE_DIRS}"
+)
+
+set(LIBMV_LIGHT_LIBS
+  correspondence
+  multiview
+  numeric
+  ${GLOG_LIBRARIES}
+  ${GFLAGS_LIBRARIES}
+)
+
+if(Ceres_FOUND)
+  add_definitions("-DCERES_FOUND=1")
+  list(APPEND LIBMV_LIGHT_LIBS simple_pipeline)
+  list(APPEND LIBMV_LIGHT_INCLUDES "${CERES_INCLUDE_DIR}")
+else()
+  add_definitions("-DCERES_FOUND=0")
+  message(STATUS "CERES support is disabled. Ceres Solver for reconstruction API is required.")
+endif()
+
+### COMPILE WITH C++11 IF CERES WAS COMPILED WITH C++11
+
+if(Ceres_FOUND)
+  list (FIND CERES_COMPILED_COMPONENTS "C++11" _index)
+  if (${_index} GREATER -1)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+  endif()
+endif()
+# build libmv_light
+if(NOT CMAKE_VERSION VERSION_LESS 2.8.11) # See ocv_target_include_directories() implementation
+  if(TARGET ${the_module})
+    get_target_property(__include_dirs ${the_module} INCLUDE_DIRECTORIES)
+    include_directories(${__include_dirs})
+  endif()
+endif()
+include_directories(${OCV_TARGET_INCLUDE_DIRS_${the_module}})
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/libmv_light" "${CMAKE_CURRENT_BINARY_DIR}/src/libmv")
+
+#ocv_target_link_libraries(${the_module} ${LIBMV_LIGHT_LIBS})
 
 set(CPPS
   example_sfm.cpp
@@ -79,14 +125,21 @@ ELSE()
     MESSAGE( STATUS "CMAKE_BUILD_TYPE not set yet ${CMAKE_BUILD_TYPE}" )
 ENDIF()
 
-find_package(Ceres)
+
 
 add_executable(${PROJECT_NAME}
     ${RESOURCES} ${CPPS} ${HEADERS} ${FORMS}
     ${DEPRECATED} ${HARDWARE} ${CAM_LIST} ${HANDEYE_LIST}  ${COMMON_CPP})
 
 target_link_libraries(  ${PROJECT_NAME} ${QT_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS}
-    libceres.so)
+    libceres.so
+    -lglog
+    -lgflags
+    mycorrespondence
+    mymultiview
+    mynumeric
+    mysimple_pipeline
+    )
 
 #add_executable(leaf leaf.cpp )
 #target_link_libraries(leaf PUBLIC  common)
