@@ -646,7 +646,7 @@ int main()
   int argc = 5;
   char* argv[5];
   argv[1] = "dinoR_good_silhouette_images.txt";
-  argv[2] = "1000";
+  argv[2] = "400";
   argv[3] = "320";
   argv[4] = "240";
   // Read input parameters
@@ -687,7 +687,7 @@ int main()
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloudp (new pcl::PointCloud<pcl::PointXYZ>);
   cloudp->resize(points3d_estimated.size());
   for (int i = 0; i < points3d_estimated.size(); ++i) {
-    cout << points3d_estimated[i] << endl;
+    //cout << points3d_estimated[i] << endl;
     int id = 0;
     for(mat_it = points3d_estimated[i].begin<double>(); mat_it != points3d_estimated[i].end<double>(); mat_it++) {
       points_file << *mat_it << " ";
@@ -695,6 +695,13 @@ int main()
     }
     points_file << "\n";
   }
+  auto& pts= cloudp->points;
+  std::sort(pts.begin(), pts.end(), [](const auto &p1, const auto&p2){
+      return fabs(p1.x) + fabs(p1.y) + fabs(p1.z) <
+              fabs(p2.x) + fabs(p2.y) + fabs(p2.z);
+  });
+  cloudp->points.resize(max(1.0, cloudp->points.size()*0.8));
+  cloudp->resize(cloudp->points.size());
   pcl::io::savePCDFile("ans.pcd", *cloudp);
 
   cout << "Done. Points saved to points.txt" << endl;
